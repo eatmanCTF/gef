@@ -3588,15 +3588,15 @@ class PieVirtualBreakpoint(object):
             res = gdb.execute(self.set_func(base), to_string=True)
         except gdb.error as e:
             err(e)
-            return
+            return res
 
         if "Breakpoint" not in res:
             err(res)
-            return
+            return res
         res_list = res.split()
         self.bp_num = res_list[1]
         self.bp_addr = res_list[3]
-        return
+        return res
 
     def destroy(self):
         if not self.bp_num:
