@@ -400,6 +400,29 @@ class DumpInsRVACommand(GenericCommand):
 
         gdb.execute("x/{}xi {}".format(read_len, read_from))
 
+# @register_function
+# class HeapBaseOWFunction(GenericFunction):
+#     """Return the current heap base address plus an optional offset."""
+#     _function_ = "_heap"
+
+#     def do_invoke(self, args):
+#         base = HeapBaseOWFunction.heap_base()
+#         if not base:
+#             raise gdb.GdbError("Heap not found")
+
+#         return self.arg_to_long(args, 0) + base
+
+#     @staticmethod
+#     def heap_base(arena=None):
+#         try:
+#             base = int(gdb.parse_and_eval("mp_->sbrk_base"))
+#             if base != 0:
+#                 return base
+#         except gdb.error:
+#             pass
+#         return get_section_base_address("[heap]")
+
+# HeapBaseFunction = HeapBaseOWFunction
 
 class GlibcArenaOW(GlibcArena):
     # def __init__(self, *args, **kwargs):
@@ -412,6 +435,24 @@ class GlibcArenaOW(GlibcArena):
         fmt = "{}Arena (base={:#x}, top={:#x}, last_remainder={:#x}, next={:#x}, next_free={:#x}, system_mem={:#x})"
         return fmt.format(prefix, int(self), self.top, self.last_remainder, self.n, self.nfree, self.sysmem)
     
+    # def tcachebin(self, i):
+    #     """Return head chunk in tcache[i]."""
+    #     heap_base = HeapBaseFunction.heap_base(self)
+    #     tcache = heap_base + 2*current_arch.ptrsize
+    #     try:
+    #         tcache_addr = int(gdb.parse_and_eval("tcache"))
+    #     except:
+    #         tcache_addr = 0
+    #     if tcache_addr:
+    #         tcache = tcache_addr
+    #     if get_libc_version() < (2, 30):
+    #         addr = dereference(tcache + self.TCACHE_MAX_BINS + i*current_arch.ptrsize)
+    #     else:
+    #         addr = dereference(tcache + 2*self.TCACHE_MAX_BINS + i*current_arch.ptrsize)
+    #     if not addr:
+    #         return None
+    #     return GlibcChunk(int(addr))
+
     def get_next(self):
         addr_next = int(self.next)
         arena_main = GlibcArenaOW(__gef_default_main_arena__)
