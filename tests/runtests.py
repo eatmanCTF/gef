@@ -203,6 +203,23 @@ class TestGefCommands(GefUnitTestGeneric): #pylint: disable=too-many-public-meth
         self.assertIn("size=0x20", res)
         return
 
+    def test_cmd_heap_bins_tcache(self):
+        cmd = "heap bins tcache"
+        target = "/tmp/heap-non-main.out"
+        res = gdb_run_silent_cmd(cmd, target=target)
+        self.assertNoException(res)
+        self.assertIn("Tcachebins[idx=0, size=0x20] count=1", res)
+        return
+
+    def test_cmd_heap_bins_tcache_all(self):
+        cmd = "heap bins tcache all"
+        target = "/tmp/heap-tcache.out"
+        res = gdb_run_silent_cmd(cmd, target=target)
+        self.assertNoException(res)
+        self.assertIn("Tcachebins[idx=0, size=0x20] count=3", res)
+        self.assertIn("Tcachebins[idx=1, size=0x30] count=3", res)
+        return
+
     def test_cmd_heap_analysis(self):
         cmd = "heap-analysis-helper"
         target = "/tmp/heap-analysis.out"
@@ -516,6 +533,20 @@ class TestGefCommands(GefUnitTestGeneric): #pylint: disable=too-many-public-meth
         self.assertIn("\x1b[34m42424242\x1b[0m", res)
         self.assertIn("\x1b[32m43434343\x1b[0m", res)
         self.assertIn("\x1b[35m44444444\x1b[0m", res)
+        return
+
+    def test_cmd_aliases(self):
+        # test add functionality
+        add_res = gdb_start_silent_cmd("aliases add alias_function_test example")
+        self.assertNoException(add_res)
+        # test list functionality
+        list_res = gdb_start_silent_cmd("aliases ls", before=["aliases add alias_function_test example"])
+        self.assertNoException(list_res)
+        self.assertIn("alias_function_test", list_res)
+        # test rm functionality
+        rm_res = gdb_start_silent_cmd("aliases ls", before=["aliases add alias_function_test example", "aliases rm alias_function_test"])
+        self.assertNoException(rm_res)
+        self.assertNotIn("alias_function_test", rm_res)
         return
 
 
