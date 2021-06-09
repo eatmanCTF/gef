@@ -1,3 +1,17 @@
+import argparse
+
+__gef_default_current_arena__ = "thread_arena"
+
+def unregister_command(cls):
+    """Unregister an existing GEF (sub-)command to GDB."""
+    global __commands__
+    __commands__.remove(cls)
+    __gef__.loaded_commands = []
+    __gef__.load(initial=True)
+    __gef__.doc.add_command_to_doc((cls._cmdline_, cls, None))
+    __gef__.doc.refresh()
+    return
+
 class Hexdump32Command(HexdumpCommand):
     """Display SIZE lines of hexdump from the memory location pointed by ADDRESS."""
 
@@ -181,10 +195,8 @@ class RVACommand(GenericCommand):
 
     @staticmethod
     def base_address(path=""):
-        cfg_base_filepath = get_gef_setting("rva.base_filepath")
-        if not cfg_base_filepath:
+        if not get_gef_setting("rva.base_filepath"):
             set_gef_setting("rva.base_filepath", get_filepath())
-        cfg_base_filepath = get_gef_setting("rva.base_filepath")
         base_filepath = path if path else get_gef_setting("rva.base_filepath")
         match = None
         first_match = None
@@ -253,42 +265,40 @@ class VACommand(GenericCommand):
         gef_print("{:#x}".format(offset + base_address))
 
 
-class BreakRVACommand(PieBreakpointCommand):
+class BreakRVACommand(GenericCommand):
     """Set a PIE breakpoint."""
 
     _cmdline_ = "brva"
-    _syntax_ = "{:s} BREAKPOINT [FILENAME] [CONDITION]".format(_cmdline_)
+    _parser = argparse.ArgumentParser(prog=_cmdline_)
 
     def __init__(self):
         super(BreakRVACommand, self).__init__(complete=gdb.COMPLETE_LOCATION)
         self.format = None
+        self._parser.add_argument("-f", "--file", default="", type=str, help="the file used to calculate the base address")
+        self._parser.add_argument("rva", type=str, help="the relative address where the breakpoint will be set")
+        self._parser.add_argument("condition", type=str, nargs="*", help="the condition statement attached to the breakpoint")
         return
+
+    @property
+    def _syntax_(self):
+        return self._parser.format_help()
 
     def do_invoke(self, argv):
         global __pie_counter__, __pie_breakpoints__
-        if len(argv) < 1:
-            self.usage()
-            return
-        bp_expr = argv[0]
-        base_filepath = argv[1] if len(argv) > 1 else ""
-        if bp_expr[0] == "*":
-            addr = int(gdb.parse_and_eval(bp_expr[1:]))
-        elif bp_expr[0] == "0" and bp_expr[1] == "x":
-            addr = int(gdb.parse_and_eval(bp_expr))
+        args = self._parser.parse_args(argv)
+        base_address = RVACommand.base_address(args.file)
+        rva = args.rva
+        if rva[0] == "*":
+            addr = int(gdb.parse_and_eval(rva[1:]))
+        elif rva[0] == "0" and rva[1] == "x":
+            addr = int(gdb.parse_and_eval(rva))
         else:
             addr = int(gdb.parse_and_eval("&{}".format(
-                bp_expr)))  # get address of symbol or function name
-        condition = ""
-        if len(argv) > 2:
-            condition = ' '.join(argv[2:])
-        self.set_pie_breakpoint(lambda base: "b *{} {}".format(base + addr, condition), addr)
-
-        # When the process is already on, set real breakpoints immediately
-        if is_alive():
-            base_address = RVACommand.base_address(base_filepath)
-            for bp_ins in __pie_breakpoints__.values():
-                gef_print(bp_ins.instantiate(base_address))
-
+                rva)))  # get address of symbol or function name
+        addr += base_address
+        condition = " ".join(args.condition)
+        gdb.execute(f"break *{hex(addr)} {condition}")
+        return
 
 class DeleteRVACommand(PieDeleteCommand):
     """Delete a PIE breakpoint."""
@@ -391,6 +401,171 @@ class DumpInsRVACommand(GenericCommand):
         gdb.execute("x/{}xi {}".format(read_len, read_from))
 
 
+class GlibcArenaOW(GlibcArena):
+    # def __init__(self, *args, **kwargs):
+        # super(GlibcArenaOW, self).__init__(*args, **kwargs)
+
+    def __str__(self):
+        prefix = "  "
+        if gdb.parse_and_eval(__gef_default_current_arena__) == int(self):
+            prefix = "* "
+        fmt = "{}Arena (base={:#x}, top={:#x}, last_remainder={:#x}, next={:#x}, next_free={:#x}, system_mem={:#x})"
+        return fmt.format(prefix, int(self), self.top, self.last_remainder, self.n, self.nfree, self.sysmem)
+    
+    def get_next(self):
+        addr_next = int(self.next)
+        arena_main = GlibcArenaOW(__gef_default_main_arena__)
+        if addr_next == int(arena_main):
+            return None
+        return GlibcArenaOW("*{:#x} ".format(addr_next))
+
+class GlibcChunkOW(GlibcChunk):
+    def __str__(self):
+        # TODO: colored by secions
+        msg = Color.colorify(f"{int(self.address):#x}", "blue")
+        return msg
+
+GlibcArena = GlibcArenaOW
+GlibcChunk = GlibcChunkOW
+
+class GlibcHeapOWCommand(GenericCommand):
+    """Overwrite the original GlibcHeapCommand."""
+
+    _cmdline_ = "heap"
+    _syntax_  = "{:s} (chunk|chunks|bins|arenas)".format(_cmdline_)
+
+    def __init__(self):
+        super(GlibcHeapOWCommand, self).__init__(prefix=True)
+        self.add_setting("chunk_display_max", 7, "The max count of chunks to display in one bin")
+        return
+
+    @only_if_gdb_running
+    def do_invoke(self, argv):
+        self.usage()
+        return
+
+class GlibcHeapArenaOWCommand(GlibcHeapArenaCommand):
+    """Re-register the original GlibcHeapArenaCommand."""
+    pass
+
+class GlibcHeapBinsOWCommand(GlibcHeapBinsCommand):
+    """Re-register the original GlibcHeapBinsCommand."""
+
+    def __init__(self):
+        obj = GlibcHeapBinsCommand
+        setattr(obj, 'pprint_bin', self.pprint_bin)
+        super(GlibcHeapBinsOWCommand, self).__init__()
+        
+    @staticmethod
+    def pprint_bin(arena_addr, index, _type=""):
+        arena = GlibcArena(arena_addr)
+        fw, bk = arena.bin(index)
+
+        if bk==0x00 and fw==0x00:
+            warn("Invalid backward and forward bin pointers(fw==bk==NULL)")
+            return -1
+
+        nb_chunk = 0
+        head = GlibcChunk(bk, from_base=True).fwd
+        if fw == head:
+            return nb_chunk
+
+        ok("{}bins[{:d}]: fw={:#x}, bk={:#x}".format(_type, index, fw, bk))
+
+        m = []
+        count = 0
+        max_count = get_gef_setting("heap.chunk_display_max")
+        display = True
+        while fw != head:
+            chunk = GlibcChunk(fw, from_base=True)
+            if display:
+                m.append("{:s}  {:s}".format(RIGHT_ARROW, str(chunk)))
+            fw = chunk.fwd
+            nb_chunk += 1
+            if count >= max_count:
+                if display:
+                    m.append("...")
+                display = False
+            count += 1
+        if m:
+            gef_print("  ".join(m))
+        return nb_chunk
+
+
+
+class GlibcHeapFastbinsYOWCommand(GlibcHeapFastbinsYCommand):
+    """Re-register the original GlibcHeapFastbinsYOWCommand."""
+    
+    @only_if_gdb_running
+    def do_invoke(self, argv):
+        def fastbin_index(sz):
+            return (sz >> 4) - 2 if SIZE_SZ == 8 else (sz >> 3) - 2
+
+        SIZE_SZ = current_arch.ptrsize
+        MAX_FAST_SIZE = (80 * SIZE_SZ // 4)
+        NFASTBINS = fastbin_index(MAX_FAST_SIZE) - 1
+
+        arena = GlibcArena("*{:s}".format(argv[0])) if len(argv) == 1 else get_main_arena()
+
+        if arena is None:
+            err("Invalid Glibc arena")
+            return
+
+        gef_print(titlify("Fastbins for arena {:#x}".format(int(arena))))
+        for i in range(NFASTBINS):
+            gef_print("Fastbins[{:#x}] ".format((i+2)*SIZE_SZ*2), end="")
+            chunk = arena.fastbin(i)
+            chunks = set()
+            count = 0
+            max_count = get_gef_setting("heap.chunk_display_max")
+            while True:
+                if chunk is None:
+                    gef_print("0x00", end="")
+                    break
+
+                try:
+                    gef_print("{:s} {:s} ".format(LEFT_ARROW, str(chunk)), end="")
+                    if chunk.address in chunks:
+                        gef_print("{:s} [loop detected]".format(RIGHT_ARROW), end="")
+                        break
+
+                    if fastbin_index(chunk.get_chunk_size()) != i:
+                        gef_print("[incorrect fastbin_index] ", end="")
+
+                    chunks.add(chunk.address)
+
+                    next_chunk = chunk.get_fwd_ptr(True)
+                    if next_chunk == 0:
+                        break
+
+                    chunk = GlibcChunk(next_chunk, from_base=True)
+                except gdb.MemoryError:
+                    gef_print("{:s} [Corrupted chunk at {:#x}]".format(LEFT_ARROW, chunk.address), end="")
+                    break
+                count += 1
+                if count >= max_count:
+                    gef_print("...")
+                    break
+            gef_print()
+        return
+
+class GlibcHeapTcachebinsOWCommand(GlibcHeapTcachebinsCommand):
+    """Re-register the original GlibcHeapTcachebinsCommand."""
+    pass
+
+class GlibcHeapUnsortedBinsOWCommand(GlibcHeapUnsortedBinsCommand):
+    """Re-register the original GlibcHeapUnsortedBinsCommand."""
+    pass
+
+class GlibcHeapSmallBinsOWCommand(GlibcHeapSmallBinsCommand):
+    """Re-register the original GlibcHeapSmallBinsCommand."""
+    pass
+
+class GlibcHeapLargeBinsOWCommand(GlibcHeapLargeBinsCommand):
+    """Re-register the original GlibcHeapLargeBinsCommand."""
+    pass
+
+
 register_external_command(DumpQwordCommand())
 register_external_command(DumpDwordCommand())
 register_external_command(DumpWordCommand())
@@ -404,3 +579,12 @@ register_external_command(DumpDwordRVACommand())
 register_external_command(DumpWordRVACommand())
 register_external_command(DumpByteRVACommand())
 register_external_command(DumpInsRVACommand())
+register_external_command(GlibcHeapOWCommand())
+register_external_command(GlibcHeapArenaOWCommand())
+register_external_command(GlibcHeapBinsOWCommand())
+register_external_command(GlibcHeapTcachebinsOWCommand())
+register_external_command(GlibcHeapFastbinsYOWCommand())
+register_external_command(GlibcHeapUnsortedBinsOWCommand())
+register_external_command(GlibcHeapSmallBinsOWCommand())
+register_external_command(GlibcHeapLargeBinsOWCommand())
+    
