@@ -400,29 +400,6 @@ class DumpInsRVACommand(GenericCommand):
 
         gdb.execute("x/{}xi {}".format(read_len, read_from))
 
-# @register_function
-# class HeapBaseOWFunction(GenericFunction):
-#     """Return the current heap base address plus an optional offset."""
-#     _function_ = "_heap"
-
-#     def do_invoke(self, args):
-#         base = HeapBaseOWFunction.heap_base()
-#         if not base:
-#             raise gdb.GdbError("Heap not found")
-
-#         return self.arg_to_long(args, 0) + base
-
-#     @staticmethod
-#     def heap_base(arena=None):
-#         try:
-#             base = int(gdb.parse_and_eval("mp_->sbrk_base"))
-#             if base != 0:
-#                 return base
-#         except gdb.error:
-#             pass
-#         return get_section_base_address("[heap]")
-
-# HeapBaseFunction = HeapBaseOWFunction
 
 class GlibcArenaOW(GlibcArena):
     # def __init__(self, *args, **kwargs):
@@ -434,24 +411,6 @@ class GlibcArenaOW(GlibcArena):
             prefix = "* "
         fmt = "{}Arena (base={:#x}, top={:#x}, last_remainder={:#x}, next={:#x}, next_free={:#x}, system_mem={:#x})"
         return fmt.format(prefix, int(self), self.top, self.last_remainder, self.n, self.nfree, self.sysmem)
-    
-    # def tcachebin(self, i):
-    #     """Return head chunk in tcache[i]."""
-    #     heap_base = HeapBaseFunction.heap_base(self)
-    #     tcache = heap_base + 2*current_arch.ptrsize
-    #     try:
-    #         tcache_addr = int(gdb.parse_and_eval("tcache"))
-    #     except:
-    #         tcache_addr = 0
-    #     if tcache_addr:
-    #         tcache = tcache_addr
-    #     if get_libc_version() < (2, 30):
-    #         addr = dereference(tcache + self.TCACHE_MAX_BINS + i*current_arch.ptrsize)
-    #     else:
-    #         addr = dereference(tcache + 2*self.TCACHE_MAX_BINS + i*current_arch.ptrsize)
-    #     if not addr:
-    #         return None
-    #     return GlibcChunk(int(addr))
 
     def get_next(self):
         addr_next = int(self.next)
@@ -464,6 +423,14 @@ class GlibcChunkOW(GlibcChunk):
     def __str__(self):
         # TODO: colored by secions
         msg = Color.colorify(f"{int(self.address):#x}", "blue")
+        return msg
+
+    @property
+    def details(self):
+        msg = "{:s} {:#x} (size={:#x}, flags={:s})".format(Color.colorify("Chunk", "yellow bold underline"),
+                                                                int(self.address) - 2*current_arch.ptrsize,
+                                                                self.get_chunk_size(),
+                                                                self.flags_as_string())
         return msg
 
 GlibcArena = GlibcArenaOW
@@ -497,6 +464,7 @@ class GlibcHeapBinsOWCommand(GlibcHeapBinsCommand):
         setattr(obj, 'pprint_bin', self.pprint_bin)
         super(GlibcHeapBinsOWCommand, self).__init__()
         
+    # rewrite pprint_bin to support max chunk count
     @staticmethod
     def pprint_bin(arena_addr, index, _type=""):
         arena = GlibcArena(arena_addr)
@@ -537,6 +505,7 @@ class GlibcHeapBinsOWCommand(GlibcHeapBinsCommand):
 class GlibcHeapFastbinsYOWCommand(GlibcHeapFastbinsYCommand):
     """Re-register the original GlibcHeapFastbinsYOWCommand."""
     
+    # rewrite do_invoke to support max chunk count
     @only_if_gdb_running
     def do_invoke(self, argv):
         def fastbin_index(sz):
@@ -606,6 +575,93 @@ class GlibcHeapLargeBinsOWCommand(GlibcHeapLargeBinsCommand):
     """Re-register the original GlibcHeapLargeBinsCommand."""
     pass
 
+def ascii_char(byte):
+    if byte >= 0x20 and byte < 0x7e:
+        return chr(byte)  # Ensure we return a str
+    else:
+        return "."
+
+class GlibcHeapChunksOWCommand(GlibcHeapChunksCommand):
+    """Re-register the original GlibcHeapChunksCommand."""
+    _cmdline_ = "heap chunks"
+    _parser = argparse.ArgumentParser(prog=_cmdline_)
+   
+    def __init__(self):
+        super(GlibcHeapChunksOWCommand, self).__init__()
+        self.format = None
+        self._parser.add_argument("addr", type=str, nargs="?", help="the address of first chunk to be printed")
+        self._parser.add_argument("-c", "--count", default=9999, type=int, help="the count of chunks to be printed")
+        self._parser.add_argument("-v", "--verbose", default=False, action="store_true", help="print chunks data")
+        return
+
+
+    @only_if_gdb_running
+    def do_invoke(self, argv):
+
+        args = self._parser.parse_args(argv)
+        count = args.count
+        verbose = args.verbose
+
+        if not args.addr:
+            heap_section = HeapBaseFunction.heap_base()
+            if not heap_section:
+                err("Heap not initialized")
+                return
+        else:
+            heap_section = int(args.addr, 0)
+
+        arena = get_main_arena()
+        if arena is None:
+            err("No valid arena")
+            return
+
+        nb = self.get_setting("peek_nb_byte")
+        current_chunk = GlibcChunk(heap_section, from_base=True)
+        i = 0
+        while True:
+            if i >= count:
+                break
+            if current_chunk.chunk_base_address == arena.top:
+                gef_print("{} {} {}".format(current_chunk.details, LEFT_ARROW, Color.greenify("top chunk")))
+                break
+
+            if current_chunk.chunk_base_address > arena.top:
+                break
+
+            if current_chunk.size == 0:
+                # EOF
+                break
+
+            if verbose:
+                line = current_chunk.details
+                if nb:
+                    line += "\n    [" + hexdump(read_memory(current_chunk.address, nb), nb, base=current_chunk.address)  + "]"
+            else:
+                line = "[{:03d}]".format(i)
+                line += Color.colorify(format_address(current_chunk.address-2*current_arch.ptrsize), "blue")
+                line += f" SIZE[0x{current_chunk.size:08x}]"
+                line += " DATA[" + hex(current_chunk.address) + "]"
+                if current_chunk.size >= 0x20:
+                    bytes_read = read_memory(current_chunk.address, 0x20)
+                else:
+                    bytes_read = read_memory(current_chunk.address, current_chunk.size)
+                line += " |" + "".join([ascii_char(c) for c in bytes_read]) + "| "
+            
+            gef_print(line)
+
+            next_chunk = current_chunk.get_next_chunk()
+            if next_chunk is None:
+                break
+
+            next_chunk_addr = Address(value=next_chunk.address)
+            if not next_chunk_addr.valid:
+                # corrupted
+                break
+            
+
+            current_chunk = next_chunk
+            i += 1
+        return
 
 register_external_command(DumpQwordCommand())
 register_external_command(DumpDwordCommand())
@@ -628,4 +684,5 @@ register_external_command(GlibcHeapFastbinsYOWCommand())
 register_external_command(GlibcHeapUnsortedBinsOWCommand())
 register_external_command(GlibcHeapSmallBinsOWCommand())
 register_external_command(GlibcHeapLargeBinsOWCommand())
-    
+register_external_command(GlibcHeapChunksOWCommand())
+# TODO: add heap search command

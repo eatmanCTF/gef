@@ -8106,7 +8106,7 @@ class ContextCommand(GenericCommand):
             if is_x86_32():
                 nb_argument = len(parameter_set)
             else:
-                nb_argument = max(function_parameters.index(p)+1 for p in parameter_set)
+                nb_argument = max(function_parameters.index(p)+1 for p in parameter_set) if parameter_set else 0
 
         args = []
         for i in range(nb_argument):
